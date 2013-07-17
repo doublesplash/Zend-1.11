@@ -601,16 +601,133 @@ class Zend_Http_Response
      * @return string
      */
     public static function decodeGzip($body)
-    {
-        if (! function_exists('gzinflate')) {
-            require_once 'Zend/Http/Exception.php';
-            throw new Zend_Http_Exception(
-                'zlib extension is required in order to decode "gzip" encoding'
-            );
-        }
-
-        return gzinflate(substr($body, 10));
+    {    	
+    	$length = strlen($body);
+		// If it doesn't look like gzip-encoded data, don't bother
+		if (18 > $length || strcmp(substr($body, 0, 2), "\x1f\x8b")) {
+		    return $body;
+		}
+		if (!function_exists('gzinflate')) {
+			require_once 'Zend/Http/Exception.php';
+		    throw new Zend_Http_Exception(
+		        'zlib extension is required in order to decode "gzip" encoding'
+		    );
+		}
+		$method = ord(substr($body, 2, 1));
+		if (8 != $method) {
+			require_once 'Zend/Http/Exception.php';
+		    throw new Zend_Http_Exception(
+		        'Error parsing gzip header: unknown compression method'
+		    );
+		}
+		$flags = ord(substr($body, 3, 1));
+		if ($flags & 224) {
+			require_once 'Zend/Http/Exception.php';
+		    throw new Zend_Http_Exception(
+		        'Error parsing gzip header: reserved bits are set'
+		    );
+		}
+		
+		// header is 10 bytes minimum. may be longer, though.
+		$headerLength = 10;
+		// extra fields, need to skip 'em
+		if ($flags & 4) {
+		    if ($length - $headerLength - 2 < 8) {
+		    	require_once 'Zend/Http/Exception.php';
+		        throw new Zend_Http_Exception(
+		            'Error parsing gzip header: data too short'
+		        );
+		    }
+		    $extraLength = unpack('v', substr($body, 10, 2));
+		    if ($length - $headerLength - 2 - $extraLength[1] < 8) {
+		    	require_once 'Zend/Http/Exception.php';
+		        throw new Zend_Http_Exception(
+		            'Error parsing gzip header: data too short'
+		        );
+		    }
+		    $headerLength += $extraLength[1] + 2;
+		}
+		// file name, need to skip that
+		if ($flags & 8) {
+		    if ($length - $headerLength - 1 < 8) {
+		    	require_once 'Zend/Http/Exception.php';
+		        throw new Zend_Http_Exception(
+		            'Error parsing gzip header: data too short'
+		        );
+		    }
+		    $filenameLength = strpos(substr($body, $headerLength), chr(0));
+		    if (false === $filenameLength || $length - $headerLength - $filenameLength - 1 < 8) {
+		    	require_once 'Zend/Http/Exception.php';
+		        throw new Zend_Http_Exception(
+		            'Error parsing gzip header: data too short'
+		        );
+		    }
+		    $headerLength += $filenameLength + 1;
+		}
+		// comment, need to skip that also
+		if ($flags & 16) {
+		    if ($length - $headerLength - 1 < 8) {
+		    	require_once 'Zend/Http/Exception.php';
+		        throw new Zend_Http_Exception(
+		            'Error parsing gzip header: data too short'
+		        );
+		    }
+		    $commentLength = strpos(substr($body, $headerLength), chr(0));
+		    if (false === $commentLength || $length - $headerLength - $commentLength - 1 < 8) {
+		    	require_once 'Zend/Http/Exception.php';
+		        throw new Zend_Http_Exception(
+		            'Error parsing gzip header: data too short'
+		        );
+		    }
+		    $headerLength += $commentLength + 1;
+		}
+		// have a CRC for header. let's check
+		if ($flags & 2) {
+		    if ($length - $headerLength - 2 < 8) {
+		    	require_once 'Zend/Http/Exception.php';
+		        throw new Zend_Http_Exception(
+		            'Error parsing gzip header: data too short'
+		        );
+		    }
+		    $crcReal   = 0xffff & crc32(substr($body, 0, $headerLength));
+		    $crcStored = unpack('v', substr($body, $headerLength, 2));
+		    if ($crcReal != $crcStored[1]) {
+		    	require_once 'Zend/Http/Exception.php';
+		        throw new Zend_Http_Exception(
+		            'Header CRC check failed'
+		        );
+		    }
+		    $headerLength += 2;
+		}
+		// unpacked data CRC and size at the end of encoded data
+		$tmp = unpack('V2', substr($body, -8));
+		$dataCrc  = $tmp[1];
+		$dataSize = $tmp[2];
+		
+		// finally, call the gzinflate() function
+		// don't pass $dataSize to gzinflate, see bugs #13135, #14370
+		$unpacked = gzinflate(substr($body, $headerLength, -8));
+		if (false === $unpacked) {
+			require_once 'Zend/Http/Exception.php';
+		    throw new Zend_Http_Exception(
+		        'gzinflate() call failed'
+		    );
+		} elseif ($dataSize != strlen($unpacked)) {
+			require_once 'Zend/Http/Exception.php';
+		    throw new Zend_Http_Exception(
+		        'Data size check failed'
+		    );
+		} elseif ((0xffffffff & $dataCrc) != (0xffffffff & crc32($unpacked))) {
+			require_once 'Zend/Http/Exception.php';
+		    throw new Zend_Http_Exception(
+		        'Data CRC check failed'
+		    );
+		}
+		return $unpacked;
+//
+//        return gzinflate(substr($body, 10));
     }
+
 
     /**
      * Decode a zlib deflated message (when Content-encoding = deflate)
